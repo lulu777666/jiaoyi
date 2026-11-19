@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>合约手续费计算器</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#e7e9ee; --muted:#8a909c;
+    --input:#10131a; --accent:#f0b90b; --green:#2ebd85; --red:#f6465d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:560px;margin:0 auto;padding:20px 16px 40px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .row{display:flex;gap:10px;margin-bottom:10px}
+  .row > *{flex:1;min-width:0}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+  input[type=number]{width:100%;background:var(--input);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:9px 10px;font-size:15px;outline:none;font-variant-numeric:tabular-nums}
+  input[type=number]:focus{border-color:var(--accent)}
+  .seg{display:flex;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:3px;gap:3px}
+  .seg button{flex:1;border:0;background:transparent;color:var(--muted);padding:7px 4px;border-radius:6px;
+    font-size:13px;cursor:pointer;white-space:nowrap}
+  .seg button.on{background:#2a2f3a;color:var(--text);font-weight:600}
+  .seg.dir button.on[data-v=long]{background:var(--green);color:#fff}
+  .seg.dir button.on[data-v=short]{background:var(--red);color:#fff}
+  .pnl{font-size:18px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums;min-height:1.4em}
+  .pnl.up{color:var(--green)} .pnl.down{color:var(--red)}
+  .pnl-sub{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;min-height:1.5em}
+  .warn{color:var(--accent);font-size:12px;min-height:1em}
+  .divider{border-top:1px dashed var(--line);margin:12px 0}
+  .tip{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>合约手续费计算器</h1>
+  <div class="sub">把开仓 + 平仓手续费都算进盈亏</div>
+
+  <div class="card">
+    <div class="row">
+      <div><label>保证金币种</label>
+        <div class="seg" id="coin"><button data-v="USDT" class="on">USDT</button><button data-v="USDC">USDC</button></div>
+      </div>
+      <div><label>方向</label>
+        <div class="seg dir" id="dir"><button data-v="long" class="on">做多</button><button data-v="short">做空</button></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div><label>开仓价</label><input type="number" id="entry" step="any" placeholder="例如 95000"></div>
+      <div><label id="amtLabel">数量（USDT）</label><input type="number" id="amount" step="any" value="1000"></div>
+    </div>
+    <div class="row" style="margin-bottom:0">
+      <div><label>止盈价（平仓价）</label><input type="number" id="tp" step="any" placeholder="可不填">
+        <div class="pnl up" id="tpPnl"></div><div class="pnl-sub" id="tpSub"></div></div>
+      <div><label>止损价（平仓价）</label><input type="number" id="sl" step="any" placeholder="可不填">
+        <div class="pnl down" id="slPnl"></div><div class="pnl-sub" id="slSub"></div></div>
+    </div>
+    <div class="warn" id="warn"></div>
+
+    <div class="divider"></div>
+
+    <div class="row">
+      <div><label id="mkLabel">USDT 挂单费率（%）</label><input type="number" id="maker" step="any" min="0"></div>
+      <div><label id="tkLabel">USDT 吃单费率（%）</label><input type="number" id="taker" step="any" min="0"></div>
+    </div>
+    <div class="row">
+      <div><label>开仓方式</label>
+        <div class="seg" id="openType"><button data-v="maker">限价挂单</button><button data-v="taker" class="on">市价吃单</button></div></div>
+      <div><label>平仓方式</label>
+        <div class="seg" id="closeType"><button data-v="maker">限价挂单</button><button data-v="taker" class="on">市价吃单</button></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// 默认费率（%）：币安普通用户 VIP0。页面上改过后会自动记住。
+const DEFAULT_FEE = { USDT:{maker:0.02, taker:0.05}, USDC:{maker:0, taker:0.04} };
+
+const $ = id => document.getElementById(id);
+const INPUTS = ['entry','amount','tp','sl'];
+const state = { coin:'USDT', dir:'long', openType:'taker', closeType:'taker',
+  fee: JSON.parse(JSON.stringify(DEFAULT_FEE)) };
+
+try {
+  const saved = JSON.parse(localStorage.getItem('feecalc4') || 'null');
+  if (saved) {
+    for (const k of ['coin','dir','openType','closeType']) if (saved[k]) state[k] = saved[k];
+    if (saved.fee) for (const c of ['USDT','USDC']) Object.assign(state.fee[c], saved.fee[c] || {});
+    for (const id of INPUTS) if (saved.inputs && saved.inputs[id] != null) $(id).value = saved.inputs[id];
+  }
+} catch(e) {}
+
+function save(){
+  try {
+    const inputs = {};
+    for (const id of INPUTS) inputs[id] = $(id).value;
+    const { coin, dir, openType, closeType, fee } = state;
+    localStorage.setItem('feecalc4', JSON.stringify({ coin, dir, openType, closeType, fee, inputs }));
+  } catch(e) {}
+}
+
+function syncCoin(){
+  const c = state.coin;
+  $('maker').value = state.fee[c].maker;
+  $('taker').value = state.fee[c].taker;
+  $('mkLabel').textContent = c + ' 挂单费率（%）';
+  $('tkLabel').textContent = c + ' 吃单费率（%）';
+  $('amtLabel').textContent = '数量（' + c + '）';
+}
+
+const num = id => { const v = parseFloat($(id).value); return isFinite(v) ? v : NaN; };
+const fmt = (v, d=2) => v.toLocaleString('zh-CN', {minimumFractionDigits:d, maximumFractionDigits:d});
+const signed = v => (v >= 0 ? '+' : '-') + fmt(Math.abs(v));
+
+function bindSeg(id, key, after){
+  const el = $(id);
+  const sync = () => el.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === state[key]));
+  el.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state[key] = b.dataset.v; sync(); after && after(); calc();
+  });
+  sync();
+}
+
+function calc(){
+  const c = state.coin, long = state.dir === 'long', f = state.fee[c];
+  const rate = t => (f[t] || 0) / 100;
+  const rOpen = rate(state.openType), rTP = rate(state.closeType), rSL = rate(state.closeType);
+  const entry = num('entry'), tp = num('tp'), sl = num('sl'), amount = num('amount');
+  const sign = long ? 1 : -1;
+
+  let warn = '';
+  if (entry > 0 && sl > 0 && (long ? sl >= entry : sl <= entry)) warn = long ? '做多的止损价应低于开仓价' : '做空的止损价应高于开仓价';
+  if (entry > 0 && tp > 0 && (long ? tp <= entry : tp >= entry)) warn = long ? '做多的止盈价应高于开仓价' : '做空的止盈价应低于开仓价';
+  $('warn').textContent = warn;
+
+  // 数量 = 仓位价值（USDT/USDC）；币数 = 数量 / 开仓价
+  const qty = entry > 0 && amount > 0 ? amount / entry : NaN;
+  const openFee = amount * rOpen;
+
+  if (qty > 0 && tp > 0) {
+    const fee = openFee + tp * qty * rTP;
+    const net = sign * (tp - entry) * qty - fee;
+    $('tpPnl').textContent = signed(net) + ' ' + c;
+    $('tpSub').textContent = '含手续费 ' + fmt(fee, 3);
+  } else { $('tpPnl').textContent = ''; $('tpSub').textContent = ''; }
+
+  if (qty > 0 && sl > 0) {
+    const fee = openFee + sl * qty * rSL;
+    const net = sign * (sl - entry) * qty - fee;
+    $('slPnl').textContent = signed(net) + ' ' + c;
+    $('slSub').textContent = '含手续费 ' + fmt(fee, 3);
+  } else { $('slPnl').textContent = ''; $('slSub').textContent = ''; }
+
+  save();
+}
+
+bindSeg('coin', 'coin', syncCoin);
+bindSeg('dir', 'dir');
+bindSeg('openType', 'openType');
+bindSeg('closeType', 'closeType');
+for (const id of INPUTS) $(id).addEventListener('input', calc);
+for (const t of ['maker','taker']) $(t).addEventListener('input', () => {
+  const v = parseFloat($(t).value);
+  state.fee[state.coin][t] = isFinite(v) && v >= 0 ? v : 0;
+  calc();
+});
+syncCoin();
+calc();
+</script>
+</body>
+</html>
